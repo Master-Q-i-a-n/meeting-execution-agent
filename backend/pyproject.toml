@@ -36,6 +36,7 @@ dependencies = [
     "langchain==1.2.15",
     "langchain-text-splitters>=1.1,<1.2",
     "langgraph>=1.1.5,<1.2.0",
+    "langsmith>=0.7,<0.8",
     "openai>=2.37,<3",
 
     # HTTP、鉴权、日志与重试：外部系统集成、OAuth、结构化日志和失败重试。

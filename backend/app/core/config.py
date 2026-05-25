@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     linear_api_url: str = "https://api.linear.app/graphql"
     linear_default_team_id: str | None = None
 
+    langsmith_api_key: str | None = None
+    langsmith_tracing: bool = True
+    langsmith_project: str = "meeting-execution-agent-evals"
+    langsmith_endpoint: str | None = None
+
     agent_max_steps: int = 12
     agent_timeout_seconds: int = 120
 
