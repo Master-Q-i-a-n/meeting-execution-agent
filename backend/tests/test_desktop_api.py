@@ -74,7 +74,7 @@ def test_get_workflow_run_returns_trace_snapshot(client: TestClient) -> None:
     workflow_run = WorkflowRun(
         id="workflow-1",
         meeting_id="meeting-1",
-        workflow_type="meeting_analysis",
+        workflow_type="meeting_execution",
         current_node="index_semantic_documents",
         status="running",
         payload_json={"index_status": "pending"},

@@ -11,9 +11,12 @@ from app.core.redis_client import check_redis_connection_sync
 from app.models.analysis import ActionItem, AnalysisDraft
 from app.models.meeting import Meeting
 from app.models.workflow import WorkflowRun
+from app.retrieval.qdrant_store import delete_meeting_points
 from app.schemas.analysis import AnalysisDraftResponse, MeetingAnalyzeResponse
 from app.schemas.meeting import (
+    MeetingContentUpdateRequest,
     MeetingCreateTextRequest,
+    MeetingDeleteResponse,
     MeetingDetailResponse,
     MeetingSummaryResponse,
 )
@@ -26,10 +29,30 @@ from app.services.meeting_content import (
     normalize_pasted_content,
     parse_uploaded_meeting_file,
 )
+from app.services.workflow_lifecycle import cancel_waiting_meeting_workflows
 from app.workers.tasks import analyze_meeting_task
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["meetings"])
+
+ACTIVE_DELETE_BLOCKING_WORKFLOW_STATUSES = {
+    "pending",
+    "running",
+    "analyzing",
+    "dispatching",
+}
+LOCKED_ANALYSIS_DRAFT_STATUSES = {
+    "confirmed",
+    "dispatching",
+    "completed",
+    "failed",
+}
+ACTIVE_ANALYZE_BLOCKING_WORKFLOW_STATUSES = {
+    "pending",
+    "running",
+    "analyzing",
+    "dispatching",
+}
 
 
 async def _save_uploaded_meeting(
@@ -81,6 +104,47 @@ async def _load_current_analysis_draft(
     )
     result = await db.execute(statement)
     return result.scalars().first()
+
+
+async def _ensure_meeting_can_start_analysis(db: AsyncSession, meeting_id: str) -> None:
+    """重新分析前做状态门禁，避免已派发会议生成重复外部任务。"""
+    locked_draft_id = await db.scalar(
+        select(AnalysisDraft.id)
+        .where(
+            AnalysisDraft.meeting_id == meeting_id,
+            AnalysisDraft.status.in_(LOCKED_ANALYSIS_DRAFT_STATUSES),
+        )
+        .limit(1)
+    )
+    if locked_draft_id is not None:
+        logger.warning(
+            "会议重新分析被拒绝：存在已确认或已派发草稿 meeting_id=%s draft_id=%s",
+            meeting_id,
+            locked_draft_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="meeting already has confirmed or dispatched draft; re-analysis is disabled",
+        )
+
+    active_workflow_id = await db.scalar(
+        select(WorkflowRun.id)
+        .where(
+            WorkflowRun.meeting_id == meeting_id,
+            WorkflowRun.status.in_(ACTIVE_ANALYZE_BLOCKING_WORKFLOW_STATUSES),
+        )
+        .limit(1)
+    )
+    if active_workflow_id is not None:
+        logger.warning(
+            "会议重新分析被拒绝：存在活跃工作流 meeting_id=%s workflow_run_id=%s",
+            meeting_id,
+            active_workflow_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="meeting has active workflow, wait until it finishes",
+        )
 
 
 @router.post("/meetings", response_model=MeetingSummaryResponse)
@@ -178,6 +242,86 @@ async def get_meeting(
     return MeetingDetailResponse.from_model(meeting, draft_response)
 
 
+@router.delete("/meetings/{meeting_id}", response_model=MeetingDeleteResponse)
+async def delete_meeting(
+    meeting_id: str,
+    db: DbSession,
+):
+    """硬删除本地会议，并先清理 Qdrant 中对应的语义索引。"""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting not found")
+
+    active_workflow_id = await db.scalar(
+        select(WorkflowRun.id)
+        .where(
+            WorkflowRun.meeting_id == meeting_id,
+            WorkflowRun.status.in_(ACTIVE_DELETE_BLOCKING_WORKFLOW_STATUSES),
+        )
+        .limit(1)
+    )
+    if active_workflow_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="meeting has active workflow, delete it after the task finishes",
+        )
+
+    logger.info("会议删除开始 meeting_id=%s", meeting_id)
+    try:
+        qdrant_result = delete_meeting_points(meeting_id=meeting_id)
+    except Exception as exc:
+        logger.exception("会议删除中止：Qdrant 清理失败 meeting_id=%s error=%s", meeting_id, exc)
+        raise HTTPException(status_code=503, detail=f"qdrant cleanup failed: {exc}") from exc
+
+    try:
+        await db.delete(meeting)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("会议删除失败：MySQL 删除失败 meeting_id=%s error=%s", meeting_id, exc)
+        raise HTTPException(status_code=503, detail=f"meeting delete failed: {exc}") from exc
+
+    logger.info("会议删除完成 meeting_id=%s", meeting_id)
+    return MeetingDeleteResponse(
+        meeting_id=meeting_id,
+        status="deleted",
+        qdrant=qdrant_result,
+    )
+
+
+@router.patch("/meetings/{meeting_id}/content", response_model=MeetingSummaryResponse)
+async def update_meeting_content(
+    meeting_id: str,
+    request: MeetingContentUpdateRequest,
+    db: DbSession,
+):
+    """补充或修正会议原文，供等待输入/澄清的工作流恢复后重新处理。"""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting not found")
+    try:
+        content = normalize_pasted_content(request.content)
+    except EmptyMeetingContent as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    meeting.raw_content = content
+    if request.title is not None:
+        meeting.title = request.title
+    if request.occurred_at is not None:
+        meeting.occurred_at = request.occurred_at
+    meeting.metadata_json = {
+        **(meeting.metadata_json or {}),
+        **build_paste_metadata(content),
+        "updated_via": "content_patch",
+    }
+    if meeting.status in {"needs_input", "failed"}:
+        meeting.status = "uploaded"
+    await db.commit()
+    await db.refresh(meeting)
+    logger.info("会议原文已更新 meeting_id=%s content_chars=%s", meeting.id, len(content))
+    return MeetingSummaryResponse.from_model(meeting)
+
+
 @router.post("/meetings/{meeting_id}/analyze", response_model=MeetingAnalyzeResponse)
 async def analyze_meeting(
     meeting_id: str,
@@ -188,19 +332,24 @@ async def analyze_meeting(
     meeting = result.scalar_one_or_none()
     if meeting is None:
         raise HTTPException(status_code=404, detail="meeting not found")
-    if not (meeting.raw_content or "").strip():
-        raise HTTPException(status_code=400, detail="meeting raw content is empty")
-
+    await _ensure_meeting_can_start_analysis(db, meeting.id)
     previous_status = meeting.status
     workflow_run = WorkflowRun(
         meeting_id=meeting.id,
-        workflow_type="meeting_analysis",
+        workflow_type="meeting_execution",
         current_node="queue",
         status="pending",
-        payload_json={"trigger": "api"},
+        payload_json={"trigger": "api", "resume_action": "start"},
     )
     meeting.status = "analyzing"
     db.add(workflow_run)
+    await db.flush()
+    await cancel_waiting_meeting_workflows(
+        db=db,
+        meeting_id=meeting.id,
+        superseded_by_workflow_run_id=workflow_run.id,
+        reason="new meeting analysis started",
+    )
     await db.commit()
     await db.refresh(workflow_run)
     logger.info(

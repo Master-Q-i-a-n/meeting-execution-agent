@@ -150,6 +150,39 @@ def replace_meeting_points(*, meeting_id: str, points: list[PointStruct]) -> Non
     )
 
 
+def delete_meeting_points(*, meeting_id: str) -> dict[str, Any]:
+    """按会议 ID 删除 Qdrant 里的语义索引点。"""
+    logger.info("Qdrant 删除会议 points 开始 meeting_id=%s", meeting_id)
+    client = get_qdrant_client()
+    if not client.collection_exists(MEETING_CHUNKS_COLLECTION):
+        logger.info(
+            "Qdrant collection 不存在，跳过会议 points 删除 meeting_id=%s collection=%s",
+            meeting_id,
+            MEETING_CHUNKS_COLLECTION,
+        )
+        return {
+            "status": "ok",
+            "collection": MEETING_CHUNKS_COLLECTION,
+            "meeting_id": meeting_id,
+            "collection_exists": False,
+        }
+
+    client.delete(
+        collection_name=MEETING_CHUNKS_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="meeting_id", match=MatchValue(value=meeting_id))]
+        ),
+        wait=True,
+    )
+    logger.info("Qdrant 删除会议 points 完成 meeting_id=%s", meeting_id)
+    return {
+        "status": "ok",
+        "collection": MEETING_CHUNKS_COLLECTION,
+        "meeting_id": meeting_id,
+        "collection_exists": True,
+    }
+
+
 def search_meeting_chunks(
     *,
     query_vector: list[float],

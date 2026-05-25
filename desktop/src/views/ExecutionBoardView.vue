@@ -36,8 +36,13 @@ onMounted(loadBoard);
         <h1>Execution Board</h1>
         <p>查看已确认、已派发和已完成的执行项。</p>
       </div>
-      <button class="icon-text-button" @click="loadBoard">
-        <RefreshCw :size="16" />
+      <button
+        class="icon-text-button"
+        :class="{ 'is-refreshing': appStore.refreshing.actionItems }"
+        :disabled="appStore.refreshing.actionItems"
+        @click="loadBoard"
+      >
+        <RefreshCw class="refresh-icon" :size="16" />
         刷新
       </button>
     </div>

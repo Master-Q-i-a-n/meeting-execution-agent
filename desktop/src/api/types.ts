@@ -94,6 +94,12 @@ export type MeetingDetail = MeetingSummary & {
   analysis_draft: AnalysisDraft | null;
 };
 
+export type MeetingDeleteResponse = {
+  meeting_id: string;
+  status: "deleted";
+  qdrant: Record<string, unknown>;
+};
+
 export type WorkflowRun = {
   id: string;
   meeting_id: string | null;
@@ -127,23 +133,11 @@ export type AnalyzeResponse = {
   status: string;
 };
 
-export type DraftDispatchResponse = {
-  draft_id: string;
+export type WorkflowContinueResponse = {
   workflow_run_id: string;
   task_id: string;
+  action: "retry_input" | "retry_extraction" | "force_continue" | "confirm_draft" | "retry_dispatch";
   status: string;
-};
-
-export type DraftConfirmationResponse = {
-  draft: AnalysisDraft;
-  snapshot: {
-    id: string;
-    analysis_draft_id: string;
-    agent_suggestion_json: Record<string, unknown>;
-    confirmed_draft_json: Record<string, unknown>;
-    created_at: string;
-  };
-  dispatch: DraftDispatchResponse | null;
 };
 
 export type Reminder = {

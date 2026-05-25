@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -64,3 +64,28 @@ class WorkflowRunResponse(BaseModel):
             created_at=workflow_run.created_at,
             updated_at=workflow_run.updated_at,
         )
+
+
+WorkflowResumeAction = Literal[
+    "retry_input",
+    "retry_extraction",
+    "force_continue",
+    "confirm_draft",
+    "retry_dispatch",
+]
+
+
+class WorkflowContinueRequest(BaseModel):
+    """恢复等待中的会议执行工作流。"""
+
+    # 前端根据当前等待节点选择动作，例如强制继续、确认草稿或重试派发。
+    action: WorkflowResumeAction
+
+
+class WorkflowContinueResponse(BaseModel):
+    """恢复工作流后返回给前端轮询 Trace 的任务信息。"""
+
+    workflow_run_id: str
+    task_id: str
+    action: WorkflowResumeAction
+    status: str

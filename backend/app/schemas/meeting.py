@@ -20,6 +20,17 @@ class MeetingCreateTextRequest(BaseModel):
     occurred_at: datetime | None = None
 
 
+class MeetingContentUpdateRequest(BaseModel):
+    """补充或修正会议原文，用于恢复等待输入/澄清的工作流。"""
+
+    # 修正后的完整会议内容；服务端按完整替换处理，避免增量拼接造成重复。
+    content: str = Field(min_length=1)
+    # 可选同步修改会议标题。
+    title: str | None = Field(default=None, max_length=200)
+    # 可选同步修改会议发生时间。
+    occurred_at: datetime | None = None
+
+
 class MeetingSummaryResponse(BaseModel):
     """会议创建后的摘要信息，不直接返回整篇原文。"""
 
@@ -77,6 +88,17 @@ class MeetingDetailResponse(MeetingSummaryResponse):
     ) -> "MeetingDetailResponse":
         summary = MeetingSummaryResponse.from_model(meeting).model_dump()
         return cls(**summary, raw_content=meeting.raw_content, analysis_draft=analysis_draft)
+
+
+class MeetingDeleteResponse(BaseModel):
+    """删除会议后的确认响应。"""
+
+    # 被删除的会议 ID。
+    meeting_id: str
+    # 删除结果，当前固定返回 deleted。
+    status: str
+    # Qdrant 清理结果摘要，方便排查向量点是否同步删除。
+    qdrant: dict[str, Any]
 
 
 def _build_content_preview(content: str, limit: int = 120) -> str:

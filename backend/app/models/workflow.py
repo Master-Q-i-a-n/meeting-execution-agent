@@ -25,7 +25,7 @@ class WorkflowRun(Base):
         nullable=True,
         index=True,
     )
-    # 工作流类别，例如 meeting_analysis、external_task_dispatch。
+    # 工作流类别，例如 meeting_execution、external_task_dispatch。
     workflow_type: Mapped[str] = mapped_column(String(64), nullable=False)
     # 当前执行到的节点名，排错时先看这里。
     current_node: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -3,13 +3,13 @@ import type {
   ActionItemDraft,
   AnalyzeResponse,
   AskResponse,
-  DraftConfirmationResponse,
-  DraftDispatchResponse,
   HealthStatus,
+  MeetingDeleteResponse,
   MeetingDetail,
   MeetingSummary,
   Reminder,
   ToolCall,
+  WorkflowContinueResponse,
   WorkflowRun,
 } from "./types";
 
@@ -60,6 +60,16 @@ export const api = {
   listMeetings: (status?: string) =>
     request<MeetingSummary[]>("/meetings", { query: { status } }),
   getMeeting: (meetingId: string) => request<MeetingDetail>(`/meetings/${meetingId}`),
+  deleteMeeting: (meetingId: string) =>
+    request<MeetingDeleteResponse>(`/meetings/${meetingId}`, { method: "DELETE" }),
+  updateMeetingContent: (
+    meetingId: string,
+    body: { content: string; title?: string | null; occurred_at?: string | null },
+  ) =>
+    request<MeetingSummary>(`/meetings/${meetingId}/content`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   createMeeting: (body: {
     title: string | null;
     source_type: "text" | "markdown";
@@ -83,12 +93,20 @@ export const api = {
       body: JSON.stringify(body),
     }),
   confirmDraft: (draftId: string) =>
-    request<DraftConfirmationResponse>(`/analysis-drafts/${draftId}/confirm`, {
+    request<WorkflowContinueResponse>(`/analysis-drafts/${draftId}/confirm`, {
       method: "POST",
     }),
   dispatchDraft: (draftId: string) =>
-    request<DraftDispatchResponse>(`/analysis-drafts/${draftId}/dispatch`, {
+    request<WorkflowContinueResponse>(`/analysis-drafts/${draftId}/dispatch`, {
       method: "POST",
+    }),
+  continueWorkflow: (
+    workflowRunId: string,
+    action: WorkflowContinueResponse["action"],
+  ) =>
+    request<WorkflowContinueResponse>(`/workflow-runs/${workflowRunId}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
     }),
   listActionItems: (query?: {
     status?: string;

@@ -10,17 +10,23 @@ import {
   RefreshCw,
   Send,
   Sparkles,
+  Trash2,
   Users,
 } from "lucide-vue-next";
 
 import { api } from "@/api/client";
 import type { AskResponse, MeetingSummary } from "@/api/types";
+import ClarificationDecisionDialog from "@/components/ClarificationDecisionDialog.vue";
 import { useAppStore } from "@/stores/app";
 import { usePollingStore } from "@/stores/polling";
+import { startClarificationDirectDispatch } from "@/utils/clarificationDispatch";
 import { formatDate, shortId } from "@/utils/format";
 
 const appStore = useAppStore();
 const pollingStore = usePollingStore();
+const LOCKED_REANALYSIS_DRAFT_STATUSES = new Set(["confirmed", "dispatching", "completed", "failed"]);
+const reanalysisDisabledMessage =
+  "This meeting has already been confirmed or dispatched. Re-analysis is disabled to avoid duplicate external tasks.";
 
 const searchText = ref("");
 const statusFilter = ref("");
@@ -30,8 +36,14 @@ const askQuestion = ref("");
 const askResult = ref<AskResponse | null>(null);
 const askLoading = ref(false);
 const actionMessage = ref("");
+const actionError = ref("");
+const showClarificationDialog = ref(false);
 
 const selectedDraft = computed(() => appStore.selectedMeeting?.analysis_draft ?? null);
+const isReanalysisLocked = computed(() => {
+  const status = selectedDraft.value?.status;
+  return status !== undefined && LOCKED_REANALYSIS_DRAFT_STATUSES.has(status);
+});
 
 const filteredMeetings = computed(() => {
   const keyword = searchText.value.trim().toLowerCase();
@@ -50,6 +62,22 @@ const riskItems = computed(() => selectedDraft.value?.risk_items ?? []);
 const unconfirmedItems = computed(() => selectedDraft.value?.unconfirmed_items ?? []);
 const latestWorkflows = computed(() => appStore.workflows.slice(0, 6));
 const unreadReminders = computed(() => appStore.reminders.slice(0, 3));
+const clarificationWorkflow = computed(() => {
+  const draftId = selectedDraft.value?.id;
+  if (!draftId) {
+    return null;
+  }
+  return (
+    appStore.workflows.find((workflow) => {
+      const payloadDraftId = workflow.payload_json?.draft_id;
+      return (
+        payloadDraftId === draftId &&
+        (workflow.status === "waiting_clarification" ||
+          workflow.current_node === "wait_for_clarification")
+      );
+    }) ?? null
+  );
+});
 
 onMounted(async () => {
   await Promise.all([appStore.refreshHealth(), refreshMeetings(), appStore.loadReminders()]);
@@ -64,6 +92,7 @@ async function refreshMeetings() {
 
 async function selectMeeting(meeting: MeetingSummary) {
   actionMessage.value = "";
+  actionError.value = "";
   askResult.value = null;
   await appStore.loadMeeting(meeting.id);
 }
@@ -72,10 +101,19 @@ async function analyzeSelectedMeeting() {
   if (!appStore.selectedMeeting) {
     return;
   }
-  const response = await api.analyzeMeeting(appStore.selectedMeeting.id);
-  pollingStore.start(response.workflow_run_id);
-  await appStore.loadWorkflows(appStore.selectedMeeting.id);
-  actionMessage.value = "Analysis task queued. Trace will refresh while the worker runs.";
+  actionError.value = "";
+  if (isReanalysisLocked.value) {
+    actionError.value = reanalysisDisabledMessage;
+    return;
+  }
+  try {
+    const response = await api.analyzeMeeting(appStore.selectedMeeting.id);
+    pollingStore.start(response.workflow_run_id);
+    await appStore.loadWorkflows(appStore.selectedMeeting.id);
+    actionMessage.value = "Analysis task queued. Trace will refresh while the worker runs.";
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function confirmCurrentDraft() {
@@ -83,15 +121,64 @@ async function confirmCurrentDraft() {
   if (!draft || !appStore.selectedMeeting) {
     return;
   }
-  const response = await api.confirmDraft(draft.id);
-  if (response.dispatch) {
-    pollingStore.start(response.dispatch.workflow_run_id);
+  if (clarificationWorkflow.value) {
+    showClarificationDialog.value = true;
+    return;
   }
+  await queueDraftConfirmation();
+}
+
+async function queueDraftConfirmation() {
+  const draft = selectedDraft.value;
+  if (!draft || !appStore.selectedMeeting) {
+    return;
+  }
+  const response = await api.confirmDraft(draft.id);
+  pollingStore.start(response.workflow_run_id);
   await appStore.loadMeeting(appStore.selectedMeeting.id);
   await appStore.loadReminders();
-  actionMessage.value = response.dispatch
-    ? "Draft confirmed and dispatch task queued."
-    : "Draft confirmed.";
+  actionMessage.value = "Draft confirmation queued. Trace will continue from confirm_draft.";
+}
+
+function keepEditingClarifications() {
+  showClarificationDialog.value = false;
+  activeTab.value = "draft";
+  actionMessage.value = "请先补充待澄清信息，保存后可重新抽取或再次确认草稿。";
+}
+
+function forceContinueAndDispatch() {
+  const workflow = clarificationWorkflow.value;
+  const draft = selectedDraft.value;
+  const meeting = appStore.selectedMeeting;
+  if (!workflow || !draft || !meeting) {
+    return;
+  }
+
+  showClarificationDialog.value = false;
+  actionError.value = "";
+  startClarificationDirectDispatch({
+    workflowRunId: workflow.id,
+    draftId: draft.id,
+    onProgress: (message) => {
+      actionMessage.value = message;
+    },
+    onForceContinueQueued: (response) => {
+      pollingStore.start(response.workflow_run_id);
+    },
+    onReadyForConfirmation: async () => {
+      await appStore.loadWorkflows(meeting.id);
+    },
+    onConfirmQueued: (response) => {
+      pollingStore.start(response.workflow_run_id);
+    },
+    onComplete: async () => {
+      await appStore.loadMeeting(meeting.id);
+      await appStore.loadReminders();
+    },
+    onError: (error) => {
+      actionError.value = error instanceof Error ? error.message : String(error);
+    },
+  });
 }
 
 async function dispatchCurrentDraft() {
@@ -103,6 +190,31 @@ async function dispatchCurrentDraft() {
   pollingStore.start(response.workflow_run_id);
   await appStore.loadWorkflows(appStore.selectedMeeting.id);
   actionMessage.value = "Dispatch task queued.";
+}
+
+async function deleteSelectedMeeting() {
+  const meeting = appStore.selectedMeeting;
+  if (!meeting) {
+    return;
+  }
+  const title = meeting.title || meeting.id;
+  const confirmed = window.confirm(`Delete meeting "${title}"? This cannot be undone.`);
+  if (!confirmed) {
+    return;
+  }
+  actionMessage.value = "";
+  actionError.value = "";
+  try {
+    await appStore.deleteMeeting(meeting.id);
+    await refreshMeetings();
+    await appStore.loadReminders();
+    if (appStore.meetings[0]) {
+      await selectMeeting(appStore.meetings[0]);
+    }
+    actionMessage.value = "Meeting deleted.";
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function askSelectedMeeting() {
@@ -139,8 +251,14 @@ function citationText(citation: Record<string, unknown>) {
           <h1>Meetings</h1>
           <p>{{ filteredMeetings.length }} of {{ appStore.meetings.length }} meetings</p>
         </div>
-        <button class="icon-button" title="刷新会议列表" @click="refreshMeetings">
-          <RefreshCw :size="16" />
+        <button
+          class="icon-button"
+          :class="{ 'is-refreshing': appStore.refreshing.meetings }"
+          :disabled="appStore.refreshing.meetings"
+          title="刷新会议列表"
+          @click="refreshMeetings"
+        >
+          <RefreshCw class="refresh-icon" :size="16" />
         </button>
       </div>
 
@@ -207,7 +325,12 @@ function citationText(citation: Record<string, unknown>) {
             </div>
           </div>
           <div class="header-actions">
-            <button class="outline-button" @click="analyzeSelectedMeeting">
+            <button
+              class="outline-button"
+              :disabled="isReanalysisLocked"
+              :title="isReanalysisLocked ? reanalysisDisabledMessage : 'Analyze meeting'"
+              @click="analyzeSelectedMeeting"
+            >
               <PlayCircle :size="17" />
               Analyze
             </button>
@@ -225,6 +348,14 @@ function citationText(citation: Record<string, unknown>) {
             >
               Dispatch to Linear
             </button>
+            <button
+              class="danger-button"
+              :disabled="appStore.deletingMeetingId === appStore.selectedMeeting?.id"
+              @click="deleteSelectedMeeting"
+            >
+              <Trash2 :size="17" />
+              Delete
+            </button>
           </div>
         </div>
 
@@ -235,6 +366,8 @@ function citationText(citation: Record<string, unknown>) {
         </div>
 
         <div v-if="actionMessage" class="result-banner">{{ actionMessage }}</div>
+        <div v-if="isReanalysisLocked" class="result-banner">{{ reanalysisDisabledMessage }}</div>
+        <div v-if="actionError" class="error-banner">{{ actionError }}</div>
         <div v-if="pollingStore.workflow" class="polling-strip">
           Latest task: {{ pollingStore.workflow.current_node || "-" }} / {{ pollingStore.workflow.status }}
         </div>
@@ -381,4 +514,12 @@ function citationText(citation: Record<string, unknown>) {
       </section>
     </aside>
   </section>
+  <ClarificationDecisionDialog
+    :open="showClarificationDialog"
+    :loading="false"
+    :unconfirmed-items="unconfirmedItems"
+    @close="showClarificationDialog = false"
+    @add-info="keepEditingClarifications"
+    @direct-dispatch="forceContinueAndDispatch"
+  />
 </template>

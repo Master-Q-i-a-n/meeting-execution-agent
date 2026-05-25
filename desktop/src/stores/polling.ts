@@ -3,7 +3,7 @@ import { defineStore } from "pinia";
 import { api } from "@/api/client";
 import type { WorkflowRun } from "@/api/types";
 
-const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export const usePollingStore = defineStore("polling", {
   state: () => ({

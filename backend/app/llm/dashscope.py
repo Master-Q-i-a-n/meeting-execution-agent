@@ -212,6 +212,11 @@ deadline_text 要保留原文里的截止时间表达，例如“下周三”。
 每条决策、待办、风险和未确认项尽量附带 source_excerpt。
 confidence 是 0 到 1 之间的数字；不确定时可返回 null。
 """.strip()
+    system_prompt = f"""{system_prompt}
+如果待办负责人写成“某人”“待定”“负责人待定”“未知”“unknown”“TBD”，这不是有效负责人，owner_name 必须返回 null。
+如果负责人或截止时间不明确，不要猜测；请在 unconfirmed_items 里写出需要用户澄清的问题。
+后端还会再次校验 owner_name 和 due_at/deadline_text，所以 JSON 必须如实表达不确定性。
+""".strip()
     user_prompt = f"""
 请把下面会议纪要抽取为 JSON。
 

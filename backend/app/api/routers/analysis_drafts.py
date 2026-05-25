@@ -5,26 +5,21 @@ from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import DbSession
 from app.core.logger import get_logger
-from app.core.redis_client import check_redis_connection_sync
 from app.models.analysis import ActionItem, AnalysisDraft
 from app.models.workflow import WorkflowRun
 from app.schemas.analysis import (
     ActionItemDraftResponse,
     ActionItemDraftUpdateRequest,
     AnalysisDraftResponse,
-    DraftConfirmationResponse,
-    DraftConfirmationSnapshotResponse,
-    DraftDispatchResponse,
     DraftStatusUpdateRequest,
 )
+from app.schemas.workflow import WorkflowContinueResponse
 from app.services.execution_drafts import (
     ExecutionDraftError,
-    confirm_execution_draft,
     transition_execution_draft,
     update_action_item_draft,
 )
-from app.services.task_dispatch import ExternalTaskDispatchError, ensure_draft_can_dispatch
-from app.workers.tasks import dispatch_analysis_draft_task
+from app.services.workflow_resume import WorkflowResumeError, queue_workflow_resume
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["analysis-drafts"])
@@ -34,7 +29,7 @@ async def _load_analysis_draft_detail(
     db: AsyncSession,
     draft_id: str,
 ) -> AnalysisDraft | None:
-    """按草稿 ID 取完整审核上下文，供编辑、确认和派发复用。"""
+    """按草稿 ID 取完整审核上下文，供编辑、确认和重派复用。"""
     statement = (
         select(AnalysisDraft)
         .options(
@@ -61,7 +56,7 @@ async def edit_analysis_draft_action_item(
     request: ActionItemDraftUpdateRequest,
     db: DbSession,
 ):
-    """人工审核时修改执行待办。"""
+    """人工审核时修改执行待办；编辑本身不推进 LangGraph。"""
     draft = await _load_analysis_draft_detail(db, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="analysis draft not found")
@@ -86,68 +81,86 @@ async def edit_analysis_draft_action_item(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     await db.commit()
-    logger.info(
-        "待办草稿编辑完成 draft_id=%s action_item_id=%s",
-        draft_id,
-        action_item_id,
-    )
+    logger.info("待办草稿编辑完成 draft_id=%s action_item_id=%s", draft_id, action_item_id)
     return ActionItemDraftResponse.from_model(item)
 
 
 @router.post(
     "/analysis-drafts/{draft_id}/confirm",
-    response_model=DraftConfirmationResponse,
+    response_model=WorkflowContinueResponse,
 )
 async def confirm_analysis_draft(
     draft_id: str,
     db: DbSession,
 ):
-    """用户确认执行草稿并自动投递派发任务。"""
+    """兼容确认入口：恢复等待确认的同一个会议执行工作流。"""
     draft = await _load_analysis_draft_detail(db, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="analysis draft not found")
 
     try:
-        snapshot = confirm_execution_draft(draft)
-    except ExecutionDraftError as exc:
-        logger.warning("执行草稿确认被拒绝 draft_id=%s error=%s", draft_id, exc)
+        workflow = await _find_or_create_confirmation_workflow_for_draft(db=db, draft=draft)
+        response = await queue_workflow_resume(
+            db=db,
+            workflow=workflow,
+            action="confirm_draft",
+        )
+    except LookupError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WorkflowResumeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.commit()
+        raise HTTPException(status_code=503, detail=f"Celery publish failed: {exc}") from exc
 
-    db.add(snapshot)
     await db.commit()
-    await db.refresh(draft, attribute_names=["updated_at"])
-    await db.refresh(snapshot)
-    dispatch = await _queue_analysis_draft_dispatch(
-        db=db,
-        draft=draft,
-        trigger="confirm",
-    )
     logger.info(
-        "执行草稿确认完成 draft_id=%s snapshot_id=%s dispatch_workflow_run_id=%s",
+        "草稿确认恢复任务已投递 draft_id=%s workflow_run_id=%s",
         draft.id,
-        snapshot.id,
-        dispatch.workflow_run_id,
+        response.workflow_run_id,
     )
-    return DraftConfirmationResponse(
-        draft=AnalysisDraftResponse.from_model(draft),
-        snapshot=DraftConfirmationSnapshotResponse.from_model(snapshot),
-        dispatch=dispatch,
-    )
+    return response
 
 
 @router.post(
     "/analysis-drafts/{draft_id}/dispatch",
-    response_model=DraftDispatchResponse,
+    response_model=WorkflowContinueResponse,
 )
 async def dispatch_analysis_draft(
     draft_id: str,
     db: DbSession,
 ):
-    """手动派发入口用于调试和失败后的幂等重派。"""
+    """兼容手动重派入口：恢复失败的同一个会议执行工作流。"""
     draft = await _load_analysis_draft_detail(db, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="analysis draft not found")
-    return await _queue_analysis_draft_dispatch(db=db, draft=draft, trigger="api")
+
+    try:
+        workflow = await _find_resume_workflow_for_draft(
+            db=db,
+            draft=draft,
+            allowed_statuses={"failed"},
+        )
+        response = await queue_workflow_resume(
+            db=db,
+            workflow=workflow,
+            action="retry_dispatch",
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WorkflowResumeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.commit()
+        raise HTTPException(status_code=503, detail=f"Celery publish failed: {exc}") from exc
+
+    await db.commit()
+    logger.info(
+        "草稿重派恢复任务已投递 draft_id=%s workflow_run_id=%s",
+        draft.id,
+        response.workflow_run_id,
+    )
+    return response
 
 
 @router.patch(
@@ -159,7 +172,7 @@ async def update_analysis_draft_status(
     request: DraftStatusUpdateRequest,
     db: DbSession,
 ):
-    """按状态机推进确认后的执行草稿。"""
+    """保留手动状态推进接口，主要用于调试或外部派发后的兼容场景。"""
     draft = await _load_analysis_draft_detail(db, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="analysis draft not found")
@@ -181,61 +194,73 @@ async def update_analysis_draft_status(
     return AnalysisDraftResponse.from_model(draft)
 
 
-async def _queue_analysis_draft_dispatch(
+async def _find_resume_workflow_for_draft(
     *,
     db: AsyncSession,
     draft: AnalysisDraft,
-    trigger: str,
-) -> DraftDispatchResponse:
-    """创建派发 workflow，再把 Linear 创建任务交给 Celery worker。"""
-    try:
-        ensure_draft_can_dispatch(draft)
-    except ExternalTaskDispatchError as exc:
-        logger.warning("草稿派发被拒绝 draft_id=%s trigger=%s error=%s", draft.id, trigger, exc)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    workflow_run = WorkflowRun(
-        meeting_id=draft.meeting_id,
-        workflow_type="external_task_dispatch",
-        current_node="queue",
-        status="pending",
-        payload_json={"trigger": trigger, "provider": "linear", "draft_id": draft.id},
-    )
-    db.add(workflow_run)
-    await db.commit()
-    await db.refresh(workflow_run)
-    logger.info(
-        "草稿派发任务准备投递 draft_id=%s workflow_run_id=%s trigger=%s",
-        draft.id,
-        workflow_run.id,
-        trigger,
-    )
-
-    try:
-        check_redis_connection_sync()
-        task = dispatch_analysis_draft_task.delay(draft.id, workflow_run.id)
-    except Exception as exc:
-        workflow_run.status = "failed"
-        workflow_run.current_node = "queue"
-        workflow_run.error_message = f"Celery publish failed: {exc}"
-        await db.commit()
-        logger.exception(
-            "草稿派发任务投递失败 draft_id=%s workflow_run_id=%s error=%s",
-            draft.id,
-            workflow_run.id,
-            exc,
+    allowed_statuses: set[str],
+) -> WorkflowRun:
+    """从 workflow_runs 找回挂住当前 draft 的会议执行流程。"""
+    statement = (
+        select(WorkflowRun)
+        .where(
+            WorkflowRun.meeting_id == draft.meeting_id,
+            WorkflowRun.status.in_(allowed_statuses),
         )
-        raise HTTPException(status_code=503, detail=f"Celery publish failed: {exc}") from exc
+        .order_by(WorkflowRun.created_at.desc())
+    )
+    workflows = (await db.execute(statement)).scalars().all()
+    for workflow in workflows:
+        if (workflow.payload_json or {}).get("draft_id") == draft.id:
+            return workflow
+    raise LookupError("matching waiting workflow not found for draft")
 
+
+async def _find_or_create_confirmation_workflow_for_draft(
+    *,
+    db: AsyncSession,
+    draft: AnalysisDraft,
+) -> WorkflowRun:
+    """找到等待确认的 workflow；历史草稿缺少等待节点时，创建兼容恢复入口。"""
+    try:
+        return await _find_resume_workflow_for_draft(
+            db=db,
+            draft=draft,
+            allowed_statuses={"waiting_confirmation"},
+        )
+    except LookupError:
+        pass
+
+    if draft.status != "draft":
+        raise LookupError("matching waiting workflow not found for draft")
+
+    latest_workflow = await db.scalar(
+        select(WorkflowRun)
+        .where(WorkflowRun.meeting_id == draft.meeting_id)
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(1)
+    )
+    # 旧版分析流程生成草稿后会直接 completed，没有 wait_for_confirmation。
+    # 这里补一条等待确认记录，让旧草稿也能进入新的 confirm_draft -> dispatch_tasks 链路。
+    workflow = WorkflowRun(
+        meeting_id=draft.meeting_id,
+        workflow_type="meeting_execution",
+        current_node="wait_for_confirmation",
+        status="waiting_confirmation",
+        payload_json={
+            "trigger": "confirm_compat",
+            "draft_id": draft.id,
+            "resume_action": "confirm_draft",
+            "compat_from_workflow_run_id": (
+                latest_workflow.id if latest_workflow is not None else None
+            ),
+        },
+    )
+    db.add(workflow)
+    await db.flush()
     logger.info(
-        "草稿派发任务投递成功 draft_id=%s workflow_run_id=%s task_id=%s",
+        "旧草稿缺少等待确认 workflow，已创建兼容恢复入口 draft_id=%s workflow_run_id=%s",
         draft.id,
-        workflow_run.id,
-        task.id,
+        workflow.id,
     )
-    return DraftDispatchResponse(
-        draft_id=draft.id,
-        workflow_run_id=workflow_run.id,
-        task_id=task.id,
-        status=task.status,
-    )
+    return workflow

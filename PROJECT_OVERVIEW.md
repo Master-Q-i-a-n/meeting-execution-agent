@@ -79,4 +79,43 @@ flowchart TD
   -> 到期提醒
   -> 历史追问
 ```
+```mermaid
+flowchart TD
+    START([START]) --> route_resume["route_resume<br/>根据 resume_action 决定从哪里恢复"]
 
+    route_resume -->|_route_from_resume_action: load_meeting<br/>start / retry_input / retry_extraction| load_meeting["load_meeting<br/>从 MySQL 读取会议原文"]
+    route_resume -->|_route_from_resume_action: index_semantic_documents<br/>force_continue| index_semantic_documents["index_semantic_documents<br/>写入 Qdrant 语义索引"]
+    route_resume -->|_route_from_resume_action: confirm_draft<br/>confirm_draft| confirm_draft["confirm_draft<br/>确认草稿并生成快照"]
+    route_resume -->|_route_from_resume_action: retry_dispatch<br/>retry_dispatch| retry_dispatch["retry_dispatch<br/>记录重试并准备重新派发"]
+
+    load_meeting --> check_input_quality["check_input_quality<br/>检查会议原文质量"]
+
+    check_input_quality -->|_route_from_input_quality: extract_draft<br/>input_quality_status == ok| extract_draft["extract_draft<br/>调用百炼抽取结构化草稿"]
+    check_input_quality -->|_route_from_input_quality: wait_for_input_clarification<br/>输入为空/过短/疑似乱码| wait_for_input_clarification["wait_for_input_clarification<br/>等待用户补充会议原文"]
+
+    wait_for_input_clarification --> END_INPUT([END])
+
+    extract_draft --> validate_draft["validate_draft<br/>Pydantic 校验 LLM JSON"]
+    validate_draft --> normalize_clarifications["normalize_clarifications<br/>用规则补齐待澄清项"]
+    normalize_clarifications --> persist_draft["persist_draft<br/>草稿和明细落库"]
+    persist_draft --> route_unconfirmed_items["route_unconfirmed_items<br/>根据未确认项数量分流"]
+
+    route_unconfirmed_items -->|_route_from_unconfirmed_items: wait_for_clarification<br/>unconfirmed_count > 0| wait_for_clarification["wait_for_clarification<br/>等待用户澄清，可 force_continue"]
+    route_unconfirmed_items -->|_route_from_unconfirmed_items: index_semantic_documents<br/>unconfirmed_count == 0| index_semantic_documents
+
+    wait_for_clarification --> END_CLARIFY([END])
+
+    index_semantic_documents --> wait_for_confirmation["wait_for_confirmation<br/>等待用户确认草稿"]
+    wait_for_confirmation --> END_CONFIRM([END])
+
+    confirm_draft --> dispatch_tasks["dispatch_tasks<br/>调用派发服务创建 Linear Issue"]
+    retry_dispatch --> dispatch_tasks
+
+    dispatch_tasks --> route_dispatch_result["route_dispatch_result<br/>根据派发结果分流"]
+
+    route_dispatch_result -->|_route_from_dispatch_result: finish_completed<br/>dispatch_status == completed| finish_completed["finish_completed<br/>工作流完成"]
+    route_dispatch_result -->|_route_from_dispatch_result: finish_failed<br/>dispatch_status != completed| finish_failed["finish_failed<br/>工作流失败，等待重试"]
+
+    finish_completed --> END_DONE([END])
+    finish_failed --> END_FAILED([END])
+```

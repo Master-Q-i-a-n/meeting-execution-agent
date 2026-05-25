@@ -4,16 +4,37 @@ import { CheckCircle2, Save } from "lucide-vue-next";
 
 import { api } from "@/api/client";
 import type { ActionItemDraft } from "@/api/types";
+import ClarificationDecisionDialog from "@/components/ClarificationDecisionDialog.vue";
 import { useAppStore } from "@/stores/app";
 import { usePollingStore } from "@/stores/polling";
+import { startClarificationDirectDispatch } from "@/utils/clarificationDispatch";
 
 const appStore = useAppStore();
 const pollingStore = usePollingStore();
 const selectedMeetingId = ref("");
 const editing = reactive<Record<string, Partial<ActionItemDraft>>>({});
 const message = ref("");
+const errorMessage = ref("");
+const showClarificationDialog = ref(false);
 
 const draft = computed(() => appStore.selectedMeeting?.analysis_draft ?? null);
+const unconfirmedItems = computed(() => draft.value?.unconfirmed_items ?? []);
+const clarificationWorkflow = computed(() => {
+  const draftId = draft.value?.id;
+  if (!draftId) {
+    return null;
+  }
+  return (
+    appStore.workflows.find((workflow) => {
+      const payloadDraftId = workflow.payload_json?.draft_id;
+      return (
+        payloadDraftId === draftId &&
+        (workflow.status === "waiting_clarification" ||
+          workflow.current_node === "wait_for_clarification")
+      );
+    }) ?? null
+  );
+});
 
 onMounted(async () => {
   await appStore.loadMeetings();
@@ -56,12 +77,54 @@ async function confirmDraft() {
   if (!draft.value) {
     return;
   }
-  const response = await api.confirmDraft(draft.value.id);
-  message.value = "草稿已确认，派发任务已投递";
-  if (response.dispatch) {
-    pollingStore.start(response.dispatch.workflow_run_id);
+  if (clarificationWorkflow.value) {
+    showClarificationDialog.value = true;
+    return;
   }
+  const response = await api.confirmDraft(draft.value.id);
+  message.value = "草稿确认已投递，Trace 会继续显示后续节点";
+  pollingStore.start(response.workflow_run_id);
   await loadMeeting();
+}
+
+function keepEditingClarifications() {
+  showClarificationDialog.value = false;
+  message.value = "请先补充待澄清信息，保存后可重新抽取或再次确认草稿。";
+}
+
+function forceContinueAndDispatch() {
+  const workflow = clarificationWorkflow.value;
+  const currentDraft = draft.value;
+  if (!workflow || !currentDraft) {
+    return;
+  }
+
+  showClarificationDialog.value = false;
+  errorMessage.value = "";
+  startClarificationDirectDispatch({
+    workflowRunId: workflow.id,
+    draftId: currentDraft.id,
+    onProgress: (progressMessage) => {
+      message.value = progressMessage;
+    },
+    onForceContinueQueued: (response) => {
+      pollingStore.start(response.workflow_run_id);
+    },
+    onReadyForConfirmation: async () => {
+      if (selectedMeetingId.value) {
+        await appStore.loadWorkflows(selectedMeetingId.value);
+      }
+    },
+    onConfirmQueued: (response) => {
+      pollingStore.start(response.workflow_run_id);
+    },
+    onComplete: async () => {
+      await loadMeeting();
+    },
+    onError: (error) => {
+      errorMessage.value = error instanceof Error ? error.message : String(error);
+    },
+  });
 }
 </script>
 
@@ -92,6 +155,7 @@ async function confirmDraft() {
     </div>
 
     <div v-if="message" class="result-banner">{{ message }}</div>
+    <div v-if="errorMessage" class="error-banner">{{ errorMessage }}</div>
     <div v-if="!draft" class="empty-block">请选择已经分析出草稿的会议</div>
 
     <template v-else>
@@ -167,4 +231,12 @@ async function confirmDraft() {
       </div>
     </template>
   </section>
+  <ClarificationDecisionDialog
+    :open="showClarificationDialog"
+    :loading="false"
+    :unconfirmed-items="unconfirmedItems"
+    @close="showClarificationDialog = false"
+    @add-info="keepEditingClarifications"
+    @direct-dispatch="forceContinueAndDispatch"
+  />
 </template>

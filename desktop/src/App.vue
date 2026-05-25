@@ -89,8 +89,14 @@ function isOnline(value: unknown) {
         Qdrant {{ isOnline(appStore.health.qdrant) ? "Indexed" : "Offline" }}
       </span>
       <span>Response {{ appStore.lastResponseMs ?? "-" }} ms</span>
-      <button class="footer-refresh" title="刷新状态" @click="appStore.refreshHealth">
-        <RefreshCw :size="15" />
+      <button
+        class="footer-refresh"
+        :class="{ 'is-refreshing': appStore.refreshing.health }"
+        :disabled="appStore.refreshing.health"
+        title="Refresh status"
+        @click="appStore.refreshHealth"
+      >
+        <RefreshCw class="refresh-icon" :size="15" />
       </button>
       <span>Last sync: {{ footerSyncText }}</span>
     </footer>

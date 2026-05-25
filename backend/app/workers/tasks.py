@@ -1,6 +1,10 @@
 import asyncio
 
-from app.agents.meeting_analysis_graph import MeetingAnalysisState, run_meeting_analysis_graph
+from app.agents.meeting_execution_graph import (
+    MeetingExecutionState,
+    resume_meeting_execution_workflow,
+    run_meeting_execution_graph,
+)
 from app.core.logger import get_logger
 from app.db.session import async_session_factory, close_database
 from app.services.reminders import ReminderScanResult, scan_due_action_item_reminders
@@ -26,7 +30,7 @@ def analyze_meeting_task(meeting_id: str, workflow_run_id: str) -> dict[str, str
     )
     try:
         final_state = asyncio.run(
-            _run_meeting_analysis_with_database_cleanup(
+            _run_meeting_execution_with_database_cleanup(
                 meeting_id=meeting_id,
                 workflow_run_id=workflow_run_id,
             )
@@ -54,20 +58,76 @@ def analyze_meeting_task(meeting_id: str, workflow_run_id: str) -> dict[str, str
     }
 
 
-async def _run_meeting_analysis_with_database_cleanup(
+@celery_app.task(name="workflows.resume")
+def resume_meeting_execution_workflow_task(
+    workflow_run_id: str,
+    resume_action: str,
+) -> dict[str, str | None]:
+    """恢复等待中的会议执行工作流，例如强制继续、确认草稿或重试派发。"""
+    logger.info(
+        "Celery 会议工作流恢复任务开始 workflow_run_id=%s resume_action=%s",
+        workflow_run_id,
+        resume_action,
+    )
+    try:
+        final_state = asyncio.run(
+            _resume_meeting_execution_workflow_with_database_cleanup(
+                workflow_run_id=workflow_run_id,
+                resume_action=resume_action,
+            )
+        )
+    except Exception as exc:
+        logger.exception(
+            "Celery 会议工作流恢复任务失败 workflow_run_id=%s resume_action=%s error=%s",
+            workflow_run_id,
+            resume_action,
+            exc,
+        )
+        raise
+    logger.info(
+        "Celery 会议工作流恢复任务完成 workflow_run_id=%s resume_action=%s status=%s",
+        final_state["workflow_run_id"],
+        final_state["resume_action"],
+        final_state["status"],
+    )
+    return {
+        "meeting_id": final_state["meeting_id"],
+        "workflow_run_id": final_state["workflow_run_id"],
+        "draft_id": final_state["draft_id"],
+        "status": final_state["status"],
+    }
+
+
+async def _run_meeting_execution_with_database_cleanup(
     *,
     meeting_id: str,
     workflow_run_id: str,
-) -> MeetingAnalysisState:
+) -> MeetingExecutionState:
     """在 Celery task 当前 event loop 里跑图，并释放异步数据库连接池。"""
     try:
-        return await run_meeting_analysis_graph(
+        return await run_meeting_execution_graph(
             meeting_id=meeting_id,
             workflow_run_id=workflow_run_id,
         )
     finally:
         # Celery task 是同步入口；asyncio.run() 每次都会创建并关闭 event loop。
         # 必须在 loop 关闭前释放 aiomysql 连接，避免下次任务复用旧 loop 上的连接。
+        await close_database()
+
+
+async def _resume_meeting_execution_workflow_with_database_cleanup(
+    *,
+    workflow_run_id: str,
+    resume_action: str,
+) -> MeetingExecutionState:
+    """在 Celery task 当前 event loop 中恢复 LangGraph，并释放异步连接池。"""
+    try:
+        return await resume_meeting_execution_workflow(
+            workflow_run_id=workflow_run_id,
+            resume_action=resume_action,  # type: ignore[arg-type]
+        )
+    finally:
+        # resume 任务同样由 asyncio.run() 承载，必须在 loop 关闭前释放 aiomysql 连接。
         await close_database()
 
 

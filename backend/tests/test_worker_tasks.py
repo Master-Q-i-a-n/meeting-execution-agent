@@ -15,7 +15,7 @@ def test_analysis_worker_disposes_database_after_graph(monkeypatch) -> None:
         "status": "draft",
     }
 
-    async def fake_run_meeting_analysis_graph(*, meeting_id: str, workflow_run_id: str):
+    async def fake_run_meeting_execution_graph(*, meeting_id: str, workflow_run_id: str):
         assert meeting_id == "meeting-1"
         assert workflow_run_id == "workflow-1"
         events.append("graph")
@@ -24,11 +24,11 @@ def test_analysis_worker_disposes_database_after_graph(monkeypatch) -> None:
     async def fake_close_database() -> None:
         events.append("close_database")
 
-    monkeypatch.setattr(tasks, "run_meeting_analysis_graph", fake_run_meeting_analysis_graph)
+    monkeypatch.setattr(tasks, "run_meeting_execution_graph", fake_run_meeting_execution_graph)
     monkeypatch.setattr(tasks, "close_database", fake_close_database)
 
     result = asyncio.run(
-        tasks._run_meeting_analysis_with_database_cleanup(
+        tasks._run_meeting_execution_with_database_cleanup(
             meeting_id="meeting-1",
             workflow_run_id="workflow-1",
         )
@@ -42,7 +42,7 @@ def test_analysis_worker_disposes_database_when_graph_fails(monkeypatch) -> None
     """分析图报错时也要清连接池，避免下一次 Celery 任务复用旧异步连接。"""
     events: list[str] = []
 
-    async def fake_run_meeting_analysis_graph(*, meeting_id: str, workflow_run_id: str):
+    async def fake_run_meeting_execution_graph(*, meeting_id: str, workflow_run_id: str):
         assert meeting_id == "meeting-1"
         assert workflow_run_id == "workflow-1"
         events.append("graph")
@@ -51,12 +51,12 @@ def test_analysis_worker_disposes_database_when_graph_fails(monkeypatch) -> None
     async def fake_close_database() -> None:
         events.append("close_database")
 
-    monkeypatch.setattr(tasks, "run_meeting_analysis_graph", fake_run_meeting_analysis_graph)
+    monkeypatch.setattr(tasks, "run_meeting_execution_graph", fake_run_meeting_execution_graph)
     monkeypatch.setattr(tasks, "close_database", fake_close_database)
 
     with pytest.raises(RuntimeError, match="analysis failed"):
         asyncio.run(
-            tasks._run_meeting_analysis_with_database_cleanup(
+            tasks._run_meeting_execution_with_database_cleanup(
                 meeting_id="meeting-1",
                 workflow_run_id="workflow-1",
             )

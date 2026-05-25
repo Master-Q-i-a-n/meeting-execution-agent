@@ -31,8 +31,13 @@ onMounted(async () => {
           <h1>Trace</h1>
           <p>查看工作流节点、payload、错误和外部工具调用。</p>
         </div>
-        <button class="icon-text-button" @click="loadTrace">
-          <RefreshCw :size="16" />
+        <button
+          class="icon-text-button"
+          :class="{ 'is-refreshing': appStore.refreshing.workflows }"
+          :disabled="appStore.refreshing.workflows"
+          @click="loadTrace"
+        >
+          <RefreshCw class="refresh-icon" :size="16" />
           刷新
         </button>
       </div>

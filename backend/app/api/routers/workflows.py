@@ -3,7 +3,13 @@ from sqlalchemy import select
 
 from app.api.dependencies import DbSession
 from app.models.workflow import ToolCall, WorkflowRun
-from app.schemas.workflow import ToolCallResponse, WorkflowRunResponse
+from app.schemas.workflow import (
+    ToolCallResponse,
+    WorkflowContinueRequest,
+    WorkflowContinueResponse,
+    WorkflowRunResponse,
+)
+from app.services.workflow_resume import WorkflowResumeError, queue_workflow_resume
 
 router = APIRouter(tags=["workflows"])
 
@@ -32,6 +38,35 @@ async def get_workflow_run(
     if workflow_run is None:
         raise HTTPException(status_code=404, detail="workflow run not found")
     return WorkflowRunResponse.from_model(workflow_run)
+
+
+@router.post(
+    "/workflow-runs/{workflow_run_id}/continue",
+    response_model=WorkflowContinueResponse,
+)
+async def continue_workflow_run(
+    workflow_run_id: str,
+    request: WorkflowContinueRequest,
+    db: DbSession,
+):
+    """恢复等待中的会议执行工作流，前端拿返回的 workflow_run_id 继续轮询 Trace。"""
+    workflow_run = await db.get(WorkflowRun, workflow_run_id)
+    if workflow_run is None:
+        raise HTTPException(status_code=404, detail="workflow run not found")
+    try:
+        response = await queue_workflow_resume(
+            db=db,
+            workflow=workflow_run,
+            action=request.action,
+        )
+    except WorkflowResumeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.commit()
+        raise HTTPException(status_code=503, detail=f"Celery publish failed: {exc}") from exc
+
+    await db.commit()
+    return response
 
 
 @router.get(

@@ -50,8 +50,14 @@ function isOnline(value: unknown) {
       </div>
     </div>
 
-    <button class="outline-button" title="刷新连接状态" @click="appStore.refreshHealth">
-      <RefreshCw :size="16" />
+    <button
+      class="outline-button"
+      :class="{ 'is-refreshing': appStore.refreshing.health }"
+      :disabled="appStore.refreshing.health"
+      title="Refresh connection status"
+      @click="appStore.refreshHealth"
+    >
+      <RefreshCw class="refresh-icon" :size="16" />
       View Integrations
     </button>
   </header>

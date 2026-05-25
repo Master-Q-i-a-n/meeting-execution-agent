@@ -3,6 +3,7 @@ from app.retrieval import qdrant_store
 from app.retrieval.qdrant_store import (
     MEETING_CHUNKS_COLLECTION,
     build_debug_vector,
+    delete_meeting_points,
     get_qdrant_client,
 )
 
@@ -37,3 +38,25 @@ def test_qdrant_client_disables_proxy_and_compatibility_check(monkeypatch) -> No
     assert captured_kwargs["timeout"] == 3
     assert captured_kwargs["trust_env"] is False
     assert captured_kwargs["check_compatibility"] is False
+
+
+def test_delete_meeting_points_filters_by_meeting_id(monkeypatch) -> None:
+    """删除会议时只清理同一个 meeting_id 的 Qdrant points。"""
+    captured_kwargs = {}
+
+    class FakeQdrantClient:
+        def collection_exists(self, collection_name: str) -> bool:
+            assert collection_name == MEETING_CHUNKS_COLLECTION
+            return True
+
+        def delete(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(qdrant_store, "get_qdrant_client", lambda: FakeQdrantClient())
+
+    result = delete_meeting_points(meeting_id="meeting-1")
+
+    assert result["status"] == "ok"
+    assert result["meeting_id"] == "meeting-1"
+    assert captured_kwargs["collection_name"] == MEETING_CHUNKS_COLLECTION
+    assert captured_kwargs["wait"] is True
