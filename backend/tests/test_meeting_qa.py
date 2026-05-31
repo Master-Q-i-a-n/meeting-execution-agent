@@ -34,6 +34,36 @@ def test_build_citations_keeps_qdrant_payload_links() -> None:
     assert citations[0]["score"] == 0.87
 
 
+def test_build_citations_keeps_audio_source_metadata() -> None:
+    citations = build_citations(
+        [
+            SemanticSearchPoint(
+                point_id="point-1",
+                score=0.91,
+                payload={
+                    "meeting_id": "meeting-1",
+                    "chunk_id": "chunk-1",
+                    "chunk_type": "audio_transcript",
+                    "source_id": "segment-1",
+                    "source_type": "audio",
+                    "text": "张三负责接口联调。",
+                    "start_time": 12.0,
+                    "end_time": 18.0,
+                    "emotion": "neutral",
+                    "pause_before_ms": 800,
+                    "speech_rate": "normal",
+                    "source_filename": "meeting.mp3",
+                },
+            )
+        ]
+    )
+
+    assert citations[0]["source_type"] == "audio"
+    assert citations[0]["start_time"] == 12.0
+    assert citations[0]["end_time"] == 18.0
+    assert citations[0]["source_filename"] == "meeting.mp3"
+
+
 @pytest.mark.asyncio
 async def test_answer_meeting_question_returns_no_evidence_without_search_results() -> None:
     async_session = SimpleNamespace(execute=None)

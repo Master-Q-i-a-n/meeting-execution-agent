@@ -2,6 +2,7 @@ import type {
   ActionItemBoard,
   ActionItemDraft,
   AnalyzeResponse,
+  AudioSegment,
   AskResponse,
   HealthStatus,
   MeetingDeleteResponse,
@@ -60,6 +61,8 @@ export const api = {
   listMeetings: (status?: string) =>
     request<MeetingSummary[]>("/meetings", { query: { status } }),
   getMeeting: (meetingId: string) => request<MeetingDetail>(`/meetings/${meetingId}`),
+  listAudioSegments: (meetingId: string) =>
+    request<AudioSegment[]>(`/meetings/${meetingId}/audio-segments`),
   deleteMeeting: (meetingId: string) =>
     request<MeetingDeleteResponse>(`/meetings/${meetingId}`, { method: "DELETE" }),
   updateMeetingContent: (

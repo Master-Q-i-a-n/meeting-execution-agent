@@ -6,6 +6,7 @@ def test_core_tables_are_registered() -> None:
     """确认 SQLAlchemy 已经注册阶段一核心表。"""
     assert {
         "action_items",
+        "audio_segments",
         "analysis_drafts",
         "decisions",
         "draft_confirmation_snapshots",

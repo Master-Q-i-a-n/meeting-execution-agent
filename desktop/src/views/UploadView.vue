@@ -51,7 +51,7 @@ function onFileChange(event: Event) {
     <div class="page-title">
       <div>
         <h1>Upload</h1>
-        <p>粘贴会议纪要或上传 txt / md / pdf / docx。</p>
+        <p>粘贴会议纪要，或上传 txt / md / pdf / docx / 图片 / 音频。</p>
       </div>
     </div>
 
@@ -85,8 +85,9 @@ function onFileChange(event: Event) {
 
       <article class="panel">
         <h2>上传文件</h2>
-        <input type="file" accept=".txt,.md,.pdf,.docx" @change="onFileChange" />
+        <input type="file" accept=".txt,.md,.markdown,.pdf,.docx,.jpg,.jpeg,.png,.mp3,.wav,.m4a" @change="onFileChange" />
         <p class="muted">{{ selectedFile?.name || "未选择文件" }}</p>
+        <p class="muted">图片会走 OCR；音频会走 ASR 并保留时间戳和语音线索。</p>
         <button class="primary-button" @click="uploadFile">
           <UploadCloud :size="17" />
           上传会议

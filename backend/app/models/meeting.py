@@ -9,6 +9,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.analysis import AnalysisDraft
+    from app.models.audio import AudioSegment
     from app.models.chunk import MeetingChunk
     from app.models.workflow import WorkflowRun
 
@@ -56,4 +57,10 @@ class Meeting(Base):
     meeting_chunks: Mapped[list["MeetingChunk"]] = relationship(
         back_populates="meeting",
         cascade="all, delete-orphan",
+    )
+    # 会议录音转写得到的语音片段，用于时间戳引用和语气线索。
+    audio_segments: Mapped[list["AudioSegment"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+        order_by="AudioSegment.order_index",
     )

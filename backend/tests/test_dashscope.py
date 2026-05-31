@@ -9,23 +9,26 @@ from app.llm.dashscope import (
     DashScopeResponseError,
     embed_texts,
     extract_meeting_draft_json,
+    ocr_meeting_image,
+    transcribe_audio_file,
 )
 
 
 class FakeCompletions:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, annotations=None) -> None:
         self.content = content
+        self.annotations = annotations
         self.kwargs: dict = {}
 
     def create(self, **kwargs):
         self.kwargs = kwargs
-        message = SimpleNamespace(content=self.content)
+        message = SimpleNamespace(content=self.content, annotations=self.annotations)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 class FakeClient:
-    def __init__(self, content: str) -> None:
-        self.completions = FakeCompletions(content)
+    def __init__(self, content: str, annotations=None) -> None:
+        self.completions = FakeCompletions(content, annotations=annotations)
         self.chat = SimpleNamespace(completions=self.completions)
 
 
@@ -72,6 +75,54 @@ def test_dashscope_adapter_rejects_invalid_json() -> None:
             occurred_at=None,
             client=client,
         )
+
+
+def test_dashscope_ocr_uses_image_url_data_url() -> None:
+    client = FakeClient("会议纪要：张三负责接口联调。")
+
+    result = ocr_meeting_image(
+        content=b"fake-image",
+        mime_type="image/png",
+        client=client,
+    )
+
+    content = client.completions.kwargs["messages"][0]["content"]
+    assert result.startswith("会议纪要")
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_dashscope_asr_extracts_annotation_segments() -> None:
+    client = FakeClient(
+        "",
+        annotations=[
+            {
+                "sentences": [
+                    {
+                        "text": "张三负责接口联调。",
+                        "start_time": 12000,
+                        "end_time": 18000,
+                        "emotion": "neutral",
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+        ],
+    )
+
+    segments = transcribe_audio_file(
+        content=b"fake-audio",
+        mime_type="audio/mpeg",
+        client=client,
+    )
+
+    content = client.completions.kwargs["messages"][0]["content"]
+    assert content[0]["type"] == "input_audio"
+    assert content[0]["input_audio"]["data"].startswith("data:audio/mpeg;base64,")
+    assert segments[0].text == "张三负责接口联调。"
+    assert segments[0].start_time == 12
+    assert segments[0].end_time == 18
+    assert segments[0].emotion == "neutral"
 
 
 def test_dashscope_embedding_adapter_validates_dimensions() -> None:

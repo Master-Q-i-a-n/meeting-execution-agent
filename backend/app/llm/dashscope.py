@@ -1,10 +1,12 @@
+import base64
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from app.core.config import config
 from app.core.logger import get_logger
@@ -13,6 +15,18 @@ logger = get_logger(__name__)
 
 MEETING_ANALYSIS_PROMPT_VERSION = "meeting-draft-v1"
 EMBEDDING_BATCH_SIZE = 10
+
+
+@dataclass(frozen=True)
+class TranscribedAudioSegment:
+    """百炼 ASR 标准化后的语音片段。"""
+
+    text: str
+    start_time: float | None = None
+    end_time: float | None = None
+    speaker: str | None = None
+    emotion: str | None = None
+    confidence: float | None = None
 
 
 class DashScopeConfigurationError(RuntimeError):
@@ -78,6 +92,108 @@ def extract_meeting_draft_json(
         sorted(parsed.keys()),
     )
     return parsed
+
+
+def transcribe_audio_file(
+    *,
+    content: bytes,
+    mime_type: str,
+    client: Any | None = None,
+) -> list[TranscribedAudioSegment]:
+    """调用 Qwen ASR，把本地上传音频转成带时间戳的片段。"""
+    logger.info(
+        "百炼 ASR 请求开始 model=%s audio_bytes=%s mime_type=%s",
+        config.asr_model,
+        len(content),
+        mime_type,
+    )
+    try:
+        response = (client or get_dashscope_client()).chat.completions.create(
+            model=config.asr_model,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": _build_data_url(content=content, mime_type=mime_type),
+                        },
+                    },
+                ],
+            }
+        ],
+        extra_body={
+            "asr_options": {
+                "enable_itn": True,
+            }
+        },
+        timeout=240,
+    )
+    except OpenAIError as exc:
+        raise DashScopeResponseError(f"DashScope ASR request failed: {exc}") from exc
+    message = response.choices[0].message
+    segments = _extract_audio_segments_from_message(message)
+    if not segments:
+        content_text = (message.content or "").strip()
+        if content_text:
+            metadata = _extract_audio_metadata(message)
+            segments = [
+                TranscribedAudioSegment(
+                    text=content_text,
+                    emotion=_optional_str(metadata.get("emotion")),
+                    confidence=_float_value(metadata.get("confidence")),
+                )
+            ]
+    if not segments:
+        raise DashScopeResponseError("DashScope ASR returned no transcript")
+    logger.info("百炼 ASR 请求完成 segment_count=%s", len(segments))
+    return segments
+
+
+def ocr_meeting_image(
+    *,
+    content: bytes,
+    mime_type: str,
+    client: Any | None = None,
+) -> str:
+    """调用 Qwen VL OCR，把会议图片或手写纪要转成纯文本。"""
+    logger.info(
+        "百炼 OCR 请求开始 model=%s image_bytes=%s mime_type=%s",
+        config.vision_model,
+        len(content),
+        mime_type,
+    )
+    try:
+        response = (client or get_dashscope_client()).chat.completions.create(
+            model=config.vision_model,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": _build_data_url(content=content, mime_type=mime_type),
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "请只提取图片中的会议纪要文字，保持原有段落和列表结构，不要补充解释。",
+                        },
+                    ],
+                }
+            ],
+        )
+    except OpenAIError as exc:
+        raise DashScopeResponseError(f"DashScope OCR request failed: {exc}") from exc
+    text = (response.choices[0].message.content or "").strip()
+    if not text:
+        raise DashScopeResponseError("DashScope OCR returned empty text")
+    logger.info("百炼 OCR 请求完成 text_chars=%s", len(text))
+    return text
 
 
 def embed_texts(
@@ -216,6 +332,9 @@ confidence 是 0 到 1 之间的数字；不确定时可返回 null。
 如果待办负责人写成“某人”“待定”“负责人待定”“未知”“unknown”“TBD”，这不是有效负责人，owner_name 必须返回 null。
 如果负责人或截止时间不明确，不要猜测；请在 unconfirmed_items 里写出需要用户澄清的问题。
 后端还会再次校验 owner_name 和 due_at/deadline_text，所以 JSON 必须如实表达不确定性。
+如果原文包含类似 [00:00:12-00:00:18][pause=800ms][neutral][slow] 的语音线索，
+它们只能作为风险、犹豫、不确定性和优先级判断的辅助信号，不是会议事实本身。
+明显停顿、语速变慢或犹豫表述可以进入 risk_items 或 unconfirmed_items，但不要据此编造结论。
 """.strip()
     user_prompt = f"""
 请把下面会议纪要抽取为 JSON。
@@ -269,3 +388,112 @@ JSON 结构：
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _build_data_url(*, content: bytes, mime_type: str) -> str:
+    encoded = base64.b64encode(content).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _extract_audio_segments_from_message(message: Any) -> list[TranscribedAudioSegment]:
+    annotations = _as_plain_data(getattr(message, "annotations", None))
+    candidates = _collect_segment_candidates(annotations)
+    segments: list[TranscribedAudioSegment] = []
+    seen: set[tuple[str, float | None, float | None]] = set()
+    for candidate in candidates:
+        segment = _parse_audio_segment(candidate)
+        if segment is None:
+            continue
+        key = (segment.text, segment.start_time, segment.end_time)
+        if key in seen:
+            continue
+        seen.add(key)
+        segments.append(segment)
+    return segments
+
+
+def _extract_audio_metadata(message: Any) -> dict[str, Any]:
+    annotations = _as_plain_data(getattr(message, "annotations", None))
+    if isinstance(annotations, list):
+        for item in annotations:
+            if isinstance(item, dict):
+                audio_info = item.get("audio_info")
+                return audio_info if isinstance(audio_info, dict) else item
+    if isinstance(annotations, dict):
+        audio_info = annotations.get("audio_info")
+        return audio_info if isinstance(audio_info, dict) else annotations
+    return {}
+
+
+def _collect_segment_candidates(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        candidates: list[dict[str, Any]] = []
+        for item in value:
+            candidates.extend(_collect_segment_candidates(item))
+        return candidates
+    if not isinstance(value, dict):
+        return []
+
+    candidates = []
+    for key in ("segments", "sentences", "sentence", "transcripts"):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            candidates.extend(item for item in nested if isinstance(item, dict))
+
+    if value.get("text") or value.get("transcript"):
+        candidates.append(value)
+
+    for nested_value in value.values():
+        if isinstance(nested_value, dict | list):
+            candidates.extend(_collect_segment_candidates(nested_value))
+    return candidates
+
+
+def _parse_audio_segment(data: dict[str, Any]) -> TranscribedAudioSegment | None:
+    text = str(data.get("text") or data.get("transcript") or "").strip()
+    if not text:
+        return None
+    return TranscribedAudioSegment(
+        text=text,
+        start_time=_seconds_value(data.get("start_time") or data.get("begin_time") or data.get("start")),
+        end_time=_seconds_value(data.get("end_time") or data.get("finish_time") or data.get("end")),
+        speaker=_optional_str(data.get("speaker") or data.get("speaker_id")),
+        emotion=_optional_str(data.get("emotion")),
+        confidence=_float_value(data.get("confidence")),
+    )
+
+
+def _as_plain_data(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, list):
+        return [_as_plain_data(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _as_plain_data(item) for key, item in value.items()}
+    return value
+
+
+def _seconds_value(value: Any) -> float | None:
+    number = _float_value(value)
+    if number is None:
+        return None
+    # 部分 ASR 返回毫秒，数值很大时转换成秒。
+    return number / 1000 if number > 10000 else number
+
+
+def _float_value(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

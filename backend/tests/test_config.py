@@ -11,11 +11,13 @@ def test_config_loads_basic_settings() -> None:
     assert config.dashscope_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def test_dashscope_defaults_use_qwen_plus() -> None:
+def test_dashscope_defaults_use_multimodal_models() -> None:
     """默认模型配置不依赖本地 .env 覆盖。"""
     settings = Settings(_env_file=None)
 
-    assert settings.llm_model == "qwen-plus"
+    assert settings.llm_model == "qwen-plus-latest"
+    assert settings.vision_model == "qwen-vl-ocr-latest"
+    assert settings.asr_model == "qwen3-asr-flash"
     assert settings.embedding_model == "text-embedding-v3"
     assert settings.embedding_dimensions == 1024
     assert settings.linear_api_url == "https://api.linear.app/graphql"

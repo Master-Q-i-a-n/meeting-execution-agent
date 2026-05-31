@@ -100,6 +100,21 @@ export type MeetingDeleteResponse = {
   qdrant: Record<string, unknown>;
 };
 
+export type AudioSegment = {
+  id: string;
+  meeting_id: string;
+  text: string;
+  start_time: number | null;
+  end_time: number | null;
+  speaker: string | null;
+  emotion: string | null;
+  pause_before_ms: number | null;
+  speech_rate: string | null;
+  confidence: number | null;
+  source_filename: string | null;
+  order_index: number;
+};
+
 export type WorkflowRun = {
   id: string;
   meeting_id: string | null;

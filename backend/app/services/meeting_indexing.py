@@ -4,12 +4,13 @@ from uuid import uuid4
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client.models import PointStruct
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import get_logger
 from app.llm.dashscope import embed_texts
 from app.models.analysis import AnalysisDraft
+from app.models.audio import AudioSegment
 from app.models.chunk import MeetingChunk
 from app.models.meeting import Meeting
 from app.retrieval.qdrant_store import replace_meeting_points
@@ -46,6 +47,7 @@ class IndexDocument:
     chunk_index: int
     text: str
     source_excerpt: str | None
+    metadata: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -81,20 +83,54 @@ def chunk_meeting_content(
     return [TextChunk(chunk_index=index, text=text) for index, text in enumerate(texts)]
 
 
-def build_index_documents(meeting: Meeting, draft: AnalysisDraft) -> list[IndexDocument]:
+def build_index_documents(
+    meeting: Meeting,
+    draft: AnalysisDraft,
+    *,
+    audio_segments: list[AudioSegment] | None = None,
+) -> list[IndexDocument]:
     """把原文 chunk、决策和待办统一成待向量化文档。"""
-    # 原文索引保存会议上下文，后续追问时可以召回原始表述。
-    documents = [
-        IndexDocument(
-            source_type="transcript",
-            source_id=None,
-            analysis_draft_id=None,
-            chunk_index=chunk.chunk_index,
-            text=chunk.text,
-            source_excerpt=chunk.text,
-        )
-        for chunk in chunk_meeting_content(meeting.raw_content or "")
-    ]
+    if meeting.source_type == "audio" and audio_segments:
+        # 音频会议按 ASR 片段索引，payload 能保留时间戳、停顿和情绪线索。
+        documents = [
+            IndexDocument(
+                source_type="audio_transcript",
+                source_id=segment.id,
+                analysis_draft_id=None,
+                chunk_index=index,
+                text=segment.text,
+                source_excerpt=segment.text,
+                metadata={
+                    "source_type": "audio",
+                    "start_time": segment.start_time,
+                    "end_time": segment.end_time,
+                    "speaker": segment.speaker,
+                    "emotion": segment.emotion,
+                    "pause_before_ms": segment.pause_before_ms,
+                    "speech_rate": segment.speech_rate,
+                    "source_filename": segment.source_filename,
+                },
+            )
+            for index, segment in enumerate(audio_segments)
+            if segment.text.strip()
+        ]
+    else:
+        # 原文索引保存会议上下文，后续追问时可以召回原始表述。
+        documents = [
+            IndexDocument(
+                source_type="transcript",
+                source_id=None,
+                analysis_draft_id=None,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                source_excerpt=chunk.text,
+                metadata={
+                    "source_type": meeting.source_type,
+                    "source_filename": (meeting.metadata_json or {}).get("filename"),
+                },
+            )
+            for chunk in chunk_meeting_content(meeting.raw_content or "")
+        ]
 
     # 决策和待办单独做文档，能让“谁负责什么”这类问题更容易命中结构化结果。
     documents.extend(
@@ -105,6 +141,7 @@ def build_index_documents(meeting: Meeting, draft: AnalysisDraft) -> list[IndexD
             chunk_index=index,
             text=f"决策：{item.summary}",
             source_excerpt=item.source_excerpt,
+            metadata={"source_type": meeting.source_type},
         )
         for index, item in enumerate(draft.decisions)
     )
@@ -116,6 +153,7 @@ def build_index_documents(meeting: Meeting, draft: AnalysisDraft) -> list[IndexD
             chunk_index=index,
             text=_build_action_item_text(item),
             source_excerpt=item.source_excerpt,
+            metadata={"source_type": meeting.source_type},
         )
         for index, item in enumerate(draft.action_items)
     )
@@ -129,7 +167,20 @@ async def index_meeting_documents(
     draft: AnalysisDraft,
 ) -> SemanticIndexResult:
     """重建当前会议的语义索引，并把结果状态回写 MySQL。"""
-    documents = build_index_documents(meeting, draft)
+    audio_segments = (
+        (
+            await db.execute(
+                select(AudioSegment)
+                .where(AudioSegment.meeting_id == meeting.id)
+                .order_by(AudioSegment.order_index)
+            )
+        )
+        .scalars()
+        .all()
+        if meeting.source_type == "audio"
+        else []
+    )
+    documents = build_index_documents(meeting, draft, audio_segments=audio_segments)
     logger.info(
         "语义索引文档构建完成 meeting_id=%s draft_id=%s document_count=%s decisions=%s action_items=%s",
         meeting.id,
@@ -230,11 +281,13 @@ def build_qdrant_points(
                     "meeting_id": meeting_id,
                     "chunk_id": chunk.id,
                     "chunk_type": _payload_chunk_type(document.source_type),
+                    "source_type": (document.metadata or {}).get("source_type") or document.source_type,
                     "text": chunk.text,
                     "source_id": document.source_id,
                     "draft_id": document.analysis_draft_id,
                     "status": draft_status,
                     "source_excerpt": document.source_excerpt,
+                    **(document.metadata or {}),
                 },
             )
         )
@@ -272,4 +325,6 @@ def _build_action_item_text(item) -> str:
 def _payload_chunk_type(source_type: str) -> str:
     if source_type == "transcript":
         return "transcript_chunk"
+    if source_type == "audio_transcript":
+        return "audio_transcript"
     return source_type

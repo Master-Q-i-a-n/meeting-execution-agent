@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -8,12 +9,15 @@ from sqlalchemy.orm import selectinload
 from app.api.dependencies import DbSession, MeetingOccurredAt, MeetingUploadFile, MeetingUploadTitle
 from app.core.logger import get_logger
 from app.core.redis_client import check_redis_connection_sync
+from app.llm.dashscope import DashScopeConfigurationError, DashScopeResponseError
 from app.models.analysis import ActionItem, AnalysisDraft
+from app.models.audio import AudioSegment
 from app.models.meeting import Meeting
 from app.models.workflow import WorkflowRun
 from app.retrieval.qdrant_store import delete_meeting_points
 from app.schemas.analysis import AnalysisDraftResponse, MeetingAnalyzeResponse
 from app.schemas.meeting import (
+    AudioSegmentResponse,
     MeetingContentUpdateRequest,
     MeetingCreateTextRequest,
     MeetingDeleteResponse,
@@ -21,11 +25,12 @@ from app.schemas.meeting import (
     MeetingSummaryResponse,
 )
 from app.services.meeting_content import (
-    MAX_MEETING_UPLOAD_BYTES,
     EmptyMeetingContent,
     MeetingContentError,
+    ParsedAudioSegment,
     UnsupportedMeetingFileType,
     build_paste_metadata,
+    get_upload_size_limit,
     normalize_pasted_content,
     parse_uploaded_meeting_file,
 )
@@ -63,6 +68,7 @@ async def _save_uploaded_meeting(
     raw_content: str,
     metadata_json: dict,
     occurred_at: datetime | None = None,
+    audio_segments: list[ParsedAudioSegment] | None = None,
 ) -> Meeting:
     """把已经解析好的会议内容保存到 MySQL。"""
     meeting = Meeting(
@@ -72,6 +78,22 @@ async def _save_uploaded_meeting(
         metadata_json=metadata_json,
         occurred_at=occurred_at,
     )
+    if audio_segments:
+        meeting.audio_segments = [
+            AudioSegment(
+                text=segment.text,
+                start_time=segment.start_time,
+                end_time=segment.end_time,
+                speaker=segment.speaker,
+                emotion=segment.emotion,
+                pause_before_ms=segment.pause_before_ms,
+                speech_rate=segment.speech_rate,
+                confidence=segment.confidence,
+                source_filename=segment.source_filename,
+                order_index=segment.order_index,
+            )
+            for segment in audio_segments
+        ]
     db.add(meeting)
     await db.commit()
     await db.refresh(meeting)
@@ -180,16 +202,21 @@ async def upload_meeting_file(
 ):
     """上传 txt/Markdown/PDF/Word 会议纪要并保存。"""
     content = await file.read()
-    if len(content) > MAX_MEETING_UPLOAD_BYTES:
+    upload_size_limit = get_upload_size_limit(file.filename or "")
+    if len(content) > upload_size_limit:
         logger.warning(
             "会议文件上传失败：文件过大 filename=%s size=%s",
             file.filename,
             len(content),
         )
-        raise HTTPException(status_code=413, detail="uploaded file is too large")
+        raise HTTPException(
+            status_code=413,
+            detail=f"uploaded file is too large; limit is {upload_size_limit} bytes",
+        )
 
     try:
-        parsed = parse_uploaded_meeting_file(
+        parsed = await asyncio.to_thread(
+            parse_uploaded_meeting_file,
             filename=file.filename or "",
             content=content,
             content_type=file.content_type,
@@ -200,6 +227,9 @@ async def upload_meeting_file(
     except MeetingContentError as exc:
         logger.warning("会议文件上传失败：解析错误 filename=%s error=%s", file.filename, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (DashScopeConfigurationError, DashScopeResponseError) as exc:
+        logger.warning("会议文件上传失败：多模态模型调用错误 filename=%s error=%s", file.filename, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     meeting = await _save_uploaded_meeting(
         db=db,
@@ -208,6 +238,7 @@ async def upload_meeting_file(
         raw_content=parsed.text,
         metadata_json=parsed.metadata,
         occurred_at=occurred_at,
+        audio_segments=parsed.audio_segments,
     )
     logger.info("会议文件上传完成 meeting_id=%s filename=%s", meeting.id, file.filename)
     return MeetingSummaryResponse.from_model(meeting)
@@ -225,6 +256,25 @@ async def list_meetings(
     statement = statement.order_by(Meeting.updated_at.desc(), Meeting.created_at.desc())
     meetings = (await db.execute(statement)).scalars().all()
     return [MeetingSummaryResponse.from_model(meeting) for meeting in meetings]
+
+
+@router.get("/meetings/{meeting_id}/audio-segments", response_model=list[AudioSegmentResponse])
+async def list_meeting_audio_segments(
+    meeting_id: str,
+    db: DbSession,
+):
+    """查看会议录音转写片段，供前端展示时间戳和语音线索。"""
+    meeting_exists = await db.scalar(select(Meeting.id).where(Meeting.id == meeting_id))
+    if meeting_exists is None:
+        raise HTTPException(status_code=404, detail="meeting not found")
+    rows = (
+        await db.execute(
+            select(AudioSegment)
+            .where(AudioSegment.meeting_id == meeting_id)
+            .order_by(AudioSegment.order_index)
+        )
+    ).scalars().all()
+    return [AudioSegmentResponse.from_model(segment) for segment in rows]
 
 
 @router.get("/meetings/{meeting_id}", response_model=MeetingDetailResponse)

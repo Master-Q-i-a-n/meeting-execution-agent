@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     dashscope_api_key: str | None = None
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-plus"
+    vision_model: str = "qwen-vl-ocr-latest"
+    asr_model: str = "qwen3-asr-flash"
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 2000
 

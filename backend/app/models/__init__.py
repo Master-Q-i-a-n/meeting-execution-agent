@@ -6,6 +6,7 @@ from app.models.analysis import (
     RiskItem,
     UnconfirmedItem,
 )
+from app.models.audio import AudioSegment
 from app.models.chunk import MeetingChunk
 from app.models.integration import ExternalTaskMapping
 from app.models.meeting import Meeting
@@ -14,6 +15,7 @@ from app.models.workflow import ToolCall, WorkflowRun
 
 __all__ = [
     "ActionItem",
+    "AudioSegment",
     "AnalysisDraft",
     "Decision",
     "DraftConfirmationSnapshot",

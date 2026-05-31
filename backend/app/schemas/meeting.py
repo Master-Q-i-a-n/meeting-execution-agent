@@ -3,6 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.models.audio import AudioSegment
 from app.models.meeting import Meeting
 from app.schemas.analysis import AnalysisDraftResponse
 
@@ -99,6 +100,40 @@ class MeetingDeleteResponse(BaseModel):
     status: str
     # Qdrant 清理结果摘要，方便排查向量点是否同步删除。
     qdrant: dict[str, Any]
+
+
+class AudioSegmentResponse(BaseModel):
+    """会议录音转写片段响应。"""
+
+    id: str
+    meeting_id: str
+    text: str
+    start_time: float | None
+    end_time: float | None
+    speaker: str | None
+    emotion: str | None
+    pause_before_ms: int | None
+    speech_rate: str | None
+    confidence: float | None
+    source_filename: str | None
+    order_index: int
+
+    @classmethod
+    def from_model(cls, segment: AudioSegment) -> "AudioSegmentResponse":
+        return cls(
+            id=segment.id,
+            meeting_id=segment.meeting_id,
+            text=segment.text,
+            start_time=segment.start_time,
+            end_time=segment.end_time,
+            speaker=segment.speaker,
+            emotion=segment.emotion,
+            pause_before_ms=segment.pause_before_ms,
+            speech_rate=segment.speech_rate,
+            confidence=segment.confidence,
+            source_filename=segment.source_filename,
+            order_index=segment.order_index,
+        )
 
 
 def _build_content_preview(content: str, limit: int = 120) -> str:

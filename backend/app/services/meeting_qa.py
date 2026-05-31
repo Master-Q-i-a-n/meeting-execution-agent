@@ -96,6 +96,13 @@ def build_citations(search_results: list[SemanticSearchPoint]) -> list[dict[str,
                 "source_id": payload.get("source_id"),
                 "text": payload.get("text"),
                 "source_excerpt": payload.get("source_excerpt"),
+                "source_type": payload.get("source_type"),
+                "start_time": payload.get("start_time"),
+                "end_time": payload.get("end_time"),
+                "emotion": payload.get("emotion"),
+                "pause_before_ms": payload.get("pause_before_ms"),
+                "speech_rate": payload.get("speech_rate"),
+                "source_filename": payload.get("source_filename"),
                 "score": result.score,
             }
         )

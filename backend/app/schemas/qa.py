@@ -19,8 +19,15 @@ class MeetingCitationResponse(BaseModel):
     chunk_id: str | None
     chunk_type: str | None
     source_id: str | None
+    source_type: str | None = None
     text: str | None
     source_excerpt: str | None
+    start_time: float | None = None
+    end_time: float | None = None
+    emotion: str | None = None
+    pause_before_ms: int | None = None
+    speech_rate: str | None = None
+    source_filename: str | None = None
     score: float | None
 
 

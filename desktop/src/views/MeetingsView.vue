@@ -239,7 +239,23 @@ function priorityLabel(priority: string | null) {
 }
 
 function citationText(citation: Record<string, unknown>) {
+  if (citation.source_type === "audio") {
+    return `录音 ${formatAudioTime(citation.start_time)}-${formatAudioTime(citation.end_time)}：${String(citation.text ?? citation.source_excerpt ?? "")}`;
+  }
+  if (citation.source_type === "image") {
+    return `图片 OCR 来源：${String(citation.text ?? citation.source_excerpt ?? "")}`;
+  }
   return String(citation.text ?? citation.source_excerpt ?? citation.chunk_type ?? "source");
+}
+
+function formatAudioTime(value: unknown) {
+  if (typeof value !== "number") {
+    return "??:??";
+  }
+  const total = Math.floor(value);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 </script>
 

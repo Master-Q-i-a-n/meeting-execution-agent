@@ -27,6 +27,35 @@ async function ask() {
     loading.value = false;
   }
 }
+
+function citationTitle(citation: Record<string, unknown>, index: number) {
+  if (citation.source_type === "audio") {
+    return `[${index + 1}] 录音 ${formatAudioTime(citation.start_time)}-${formatAudioTime(citation.end_time)}`;
+  }
+  if (citation.source_type === "image") {
+    return `[${index + 1}] 图片 OCR 来源`;
+  }
+  return `[${index + 1}] ${String(citation.chunk_type ?? "source")}`;
+}
+
+function citationMeta(citation: Record<string, unknown>) {
+  const clues = [
+    citation.emotion ? `emotion=${citation.emotion}` : "",
+    citation.speech_rate ? `speech=${citation.speech_rate}` : "",
+    citation.pause_before_ms ? `pause=${citation.pause_before_ms}ms` : "",
+  ].filter(Boolean);
+  return clues.length ? clues.join(" · ") : `${citation.meeting_id ?? ""} / ${citation.chunk_id ?? ""}`;
+}
+
+function formatAudioTime(value: unknown) {
+  if (typeof value !== "number") {
+    return "??:??";
+  }
+  const total = Math.floor(value);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
 </script>
 
 <template>
@@ -73,10 +102,10 @@ async function ask() {
       <div v-if="!result?.citations.length" class="empty-block">暂无引用</div>
       <div v-for="(citation, index) in result?.citations" :key="index" class="tool-call-row">
         <div>
-          <strong>[{{ index + 1 }}] {{ citation.chunk_type }}</strong>
+          <strong>{{ citationTitle(citation, index) }}</strong>
           <span>{{ citation.score }}</span>
         </div>
-        <small>{{ citation.meeting_id }} / {{ citation.chunk_id }}</small>
+        <small>{{ citationMeta(citation) }}</small>
         <p>{{ citation.source_excerpt || citation.text }}</p>
       </div>
     </aside>
