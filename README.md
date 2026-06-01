@@ -17,8 +17,8 @@
 
 ## 当前能力
 
-- 上传或粘贴会议纪要，支持文本、Markdown、PDF、Word。
-- 使用阿里百炼 Qwen 抽取结构化会议结果。
+- 上传或粘贴会议纪要，支持文本、Markdown、语音和图片。
+- 使用 Qwen 抽取结构化会议结果。
 - LangGraph 编排会议执行工作流，支持等待澄清、强制继续、人工确认和派发恢复。
 - 人工审核草稿，可修改任务标题、负责人、截止时间、说明和优先级。
 - 将确认后的待办派发到 Linear。
@@ -64,7 +64,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     A[上传或粘贴会议纪要] --> B[创建 Meeting]
-    B --> C[POST /meetings/{id}/analyze]
+    B --> C[POST]
     C --> D[Celery 投递后台任务]
     D --> E[LangGraph 加载会议上下文]
     E --> F[检查输入质量]
@@ -252,39 +252,9 @@ npm.cmd --prefix desktop run dev
 http://127.0.0.1:5173
 ```
 
-## 主要接口
+## 效果截图
 
-| 功能 | 接口 |
-| --- | --- |
-| 创建文本会议 | `POST /meetings` |
-| 上传会议文件 | `POST /meetings/upload` |
-| 会议列表 | `GET /meetings` |
-| 会议详情 | `GET /meetings/{meeting_id}` |
-| 启动分析 | `POST /meetings/{meeting_id}/analyze` |
-| 继续工作流 | `POST /workflow-runs/{workflow_run_id}/continue` |
-| 编辑待办草稿 | `PATCH /analysis-drafts/{draft_id}/action-items/{action_item_id}` |
-| 确认草稿 | `POST /analysis-drafts/{draft_id}/confirm` |
-| 手动派发 | `POST /analysis-drafts/{draft_id}/dispatch` |
-| 单会议追问 | `POST /meetings/{meeting_id}/ask` |
-| 跨会议追问 | `POST /ask` |
-| 提醒列表 | `GET /reminders?status=unread` |
-| Linear 连通性测试 | `POST /integrations/linear/test` |
-
-## 效果截图和演示视频
-
-这里先预留展示位，后续可以放真实截图和 B 站演示链接。
-
-### 截图占位
-
-- 会议工作台截图：`docs/demo/dashboard.png`
-- 草稿审核截图：`docs/demo/draft-review.png`
-- Workflow Trace 截图：`docs/demo/workflow-trace.png`
-- 会后追问截图：`docs/demo/meeting-qa.png`
-
-### 演示视频占位
-
-- B 站演示视频：待补充
-- 本地演示 GIF：`docs/demo/demo.gif`
+![效果图](docs/demo/meeting.png "可选标题")
 
 ## 测试与评测
 

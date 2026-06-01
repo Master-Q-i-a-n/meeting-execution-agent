@@ -6,6 +6,7 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
+import httpx
 from openai import OpenAI, OpenAIError
 
 from app.core.config import config
@@ -47,7 +48,12 @@ def get_dashscope_client() -> OpenAI:
     if not config.dashscope_api_key:
         raise DashScopeConfigurationError("DASHSCOPE_API_KEY is required")
     logger.info("百炼客户端创建 base_url=%s", config.dashscope_base_url)
-    return OpenAI(api_key=config.dashscope_api_key, base_url=config.dashscope_base_url)
+    http_client = httpx.Client(trust_env=False)
+    return OpenAI(
+        api_key=config.dashscope_api_key,
+        base_url=config.dashscope_base_url,
+        http_client=http_client,
+    )
 
 
 def extract_meeting_draft_json(

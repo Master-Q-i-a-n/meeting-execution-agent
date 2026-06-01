@@ -8,6 +8,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 Question.md
+DEVELOPMENT_ROADMAP.md
+PROJECT_OVERVIEW.md
 
 backend/logs/
 backend/.venv/

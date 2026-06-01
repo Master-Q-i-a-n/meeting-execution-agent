@@ -169,6 +169,17 @@ async def _ensure_meeting_can_start_analysis(db: AsyncSession, meeting_id: str) 
         )
 
 
+def _meeting_content_model_error_response(exc: Exception) -> tuple[int, str]:
+    """把多模态模型错误翻译成更适合前端展示的 HTTP 错误。"""
+    message = str(exc)
+    if "audio is too long" in message.lower():
+        return (
+            413,
+            "audio is too long for qwen3-asr-flash direct upload; use a shorter clip or split the audio first",
+        )
+    return 503, message
+
+
 @router.post("/meetings", response_model=MeetingSummaryResponse)
 async def create_meeting_from_text(
     request: MeetingCreateTextRequest,
@@ -229,7 +240,8 @@ async def upload_meeting_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (DashScopeConfigurationError, DashScopeResponseError) as exc:
         logger.warning("会议文件上传失败：多模态模型调用错误 filename=%s error=%s", file.filename, exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        status_code, detail = _meeting_content_model_error_response(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
     meeting = await _save_uploaded_meeting(
         db=db,
