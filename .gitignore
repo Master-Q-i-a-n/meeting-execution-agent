@@ -23,3 +23,4 @@ storage/
 dump.rdb
 order.txt
 .qdrant-initialized
+samples/
